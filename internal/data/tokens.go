@@ -2,12 +2,11 @@ package data
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base32"
+	"fmt"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"greentlight.thinhhja.net/internal/validator"
 )
 
@@ -16,36 +15,54 @@ const (
 	ScopeAuthentication = "authentication"
 )
 
+var jwtSecretKey = []byte("nrqEUaC0g3")
+
 type Token struct {
-	Plaintext string    `json:"token"`
-	Hash      []byte    `json:"-"`
-	UserID    int64     `json:"-"`
-	Expiry    time.Time `json:"expiry"`
-	Scope     string    `json:"-"`
+	Plaintext string `json:"token"`
+	UserID    int64  `json:"-"`
+	Scope     string `json:"scope"`
+}
+
+type Payload struct {
+	UserID int64     `json:"user_id"`
+	Expiry time.Time `json:"expiry"`
+}
+
+func (p Payload) Valid() error {
+	if p.Expiry.Before(time.Now()) {
+		return fmt.Errorf("token expired")
+	}
+	return nil
 }
 
 func generateToken(userID int64, ttl time.Duration, scope string) (*Token, error) {
-	token := &Token{
+	claims := &Payload{
 		UserID: userID,
 		Expiry: time.Now().Add(ttl),
-		Scope:  scope,
 	}
 
-	randomBytes := make([]byte, 16)
-
-	_, err := rand.Read(randomBytes)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	t, err := token.SignedString(jwtSecretKey)
 	if err != nil {
 		return nil, err
 	}
-	token.Plaintext = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes)
-	hash := sha256.Sum256([]byte(token.Plaintext))
-	token.Hash = hash[:]
-	return token, nil
+	return &Token{Plaintext: t,
+		UserID: userID,
+		Scope:  scope,
+	}, nil
+}
+
+func ValidateJWTToken(token string) (*jwt.Token, error) {
+	return jwt.Parse(token, func(t_ *jwt.Token) (interface{}, error) {
+		if _, ok := t_.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method %v", t_.Header["alg"])
+		}
+		return []byte(jwtSecretKey), nil
+	})
 }
 
 func ValidateTokenPlainText(v *validator.Validator, tokenPlainText string) {
 	v.Check(tokenPlainText != "", "token", "must be provided")
-	v.Check(len(tokenPlainText) == 26, "token", "must be 26 bytes long")
 }
 
 type TokenModel struct {
@@ -57,16 +74,17 @@ func (m TokenModel) New(userID int64, ttl time.Duration, scope string) (*Token, 
 	if err != nil {
 		return nil, err
 	}
+	fmt.Sprintln(token)
 	err = m.Insert(token)
 	return token, err
 }
 
 func (m TokenModel) Insert(token *Token) error {
 	query := `
-		INSERT INTO tokens (hash, user_id, expiry, scope)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO tokens (hash, user_id, scope)
+		VALUES ($1, $2, $3)
 	`
-	args := []interface{}{token.Hash, token.UserID, token.Expiry, token.Scope}
+	args := []interface{}{token.Plaintext, token.UserID, token.Scope}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, err := m.DB.ExecContext(ctx, query, args...)

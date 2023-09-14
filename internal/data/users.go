@@ -2,12 +2,13 @@ package data
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/crypto/bcrypt"
 	"greentlight.thinhhja.net/internal/validator"
 )
@@ -175,22 +176,34 @@ func (m UserModel) Update(user *User) error {
 }
 
 func (m UserModel) GetForToken(tokenScope, tokenPlainText string) (*User, error) {
-	tokenHash := sha256.Sum256([]byte(tokenPlainText))
+	fmt.Println("Begin validating token")
+	fmt.Printf("token is %v\n", tokenPlainText)
+	token, err := ValidateJWTToken(tokenPlainText)
+	if err != nil {
+		fmt.Printf("error occurred %v", err)
+		return nil, err
+	}
+	claims := token.Claims.(jwt.MapClaims)
+	fmt.Printf("userId %v", claims)
 
+	// if time(claims["exp"]) < time.Now() {
+	// 	return nil, fmt.Errorf("token expired")
+	// }
+	userId := claims["user_id"]
 	query := `SELECT users.id, users.created_at, users.name, users.email, users.password_hash, users.activated, users.version 
 	FROM users
 	INNER JOIN tokens
-	ON users.id = tokens.user_id 
-	WHERE tokens.hash = $1
-	AND tokens.scope = $2 
-	AND tokens.expiry > $3`
-	args := []interface{}{tokenHash[:], tokenScope, time.Now()}
+	ON users.id = $1
+	WHERE tokens.hash = $2
+	AND tokens.scope = $3
+	`
+	args := []interface{}{userId, tokenPlainText, tokenScope}
 
 	var user User
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	err := m.DB.QueryRowContext(ctx, query, args...).Scan(
+	err = m.DB.QueryRowContext(ctx, query, args...).Scan(
 		&user.ID,
 		&user.CreatedAt,
 		&user.Name,
